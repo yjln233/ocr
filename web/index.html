@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Saturn Gesture Particles</title>
+  <style>
+    :root {
+      --bg: radial-gradient(circle at 20% 20%, #0f1c2e 0%, #020712 60%);
+      --panel: rgba(255, 255, 255, 0.08);
+      --text: #f5f7ff;
+      --accent: #7cd7ff;
+      --glow: 0 0 30px rgba(124, 215, 255, 0.35);
+      font-family: "Inter", "SF Pro Display", "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: var(--bg);
+      overflow: hidden;
+      height: 100vh;
+      color: var(--text);
+    }
+
+    #scene {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      display: block;
+    }
+
+    #camera {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      width: 180px;
+      height: 135px;
+      object-fit: cover;
+      border-radius: 12px;
+      background: #000;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: var(--glow);
+      opacity: 0.18;
+      pointer-events: none;
+    }
+
+    #ui {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 16px;
+      padding: 14px 18px;
+      backdrop-filter: blur(10px);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+    }
+
+    .title {
+      font-size: 16px;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+
+    .hint {
+      font-size: 14px;
+      color: rgba(255, 255, 255, 0.75);
+    }
+
+    #fullscreen {
+      padding: 8px 14px;
+      background: linear-gradient(135deg, #123047, #0b1f33);
+      color: var(--text);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      font-size: 13px;
+      letter-spacing: 0.3px;
+      cursor: pointer;
+      transition: transform 150ms ease, box-shadow 150ms ease;
+      box-shadow: var(--glow);
+    }
+
+    #fullscreen:hover {
+      transform: translateY(-1px) scale(1.02);
+      box-shadow: 0 10px 30px rgba(124, 215, 255, 0.35);
+    }
+
+    #fullscreen:active {
+      transform: translateY(0) scale(0.99);
+    }
+  </style>
+  <script type="module" src="https://unpkg.com/three@0.165.0/build/three.module.js"></script>
+  <script type="module" src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script type="module" src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+</head>
+<body>
+  <div id="ui">
+    <div class="title">Saturn — Hand-controlled Keplerian particles</div>
+    <div class="hint">张开手掌扩散，握紧手掌聚拢 · 全屏体验更沉浸</div>
+    <button id="fullscreen">⤢ 全屏</button>
+  </div>
+  <video id="camera" playsinline></video>
+  <canvas id="scene"></canvas>
+
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.165.0/build/three.module.js';
+    import { Camera } from 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js';
+    import { Hands } from 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js';
+
+    const canvas = document.getElementById('scene');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(new THREE.Color('#040712'), 1);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 16);
+
+    const light = new THREE.PointLight(0x8fc7ff, 2.2, 50);
+    light.position.set(0, 0, 8);
+    scene.add(light);
+
+    const ambient = new THREE.AmbientLight(0x4c86c8, 0.2);
+    scene.add(ambient);
+
+    const keplerMu = 1.0; // gravitational parameter controlling orbital speed
+
+    // Particle materials
+    const coreMaterial = new THREE.PointsMaterial({
+      color: 0xa6d8ff,
+      size: 0.16,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+
+    const ringMaterial = new THREE.PointsMaterial({
+      color: 0x7cb5ff,
+      size: 0.08,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+
+    const chaosMaterial = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: 0.08,
+      transparent: true,
+      opacity: 0.55,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+
+    // Core sphere made of particles
+    const coreCount = 1800;
+    const coreGeometry = new THREE.BufferGeometry();
+    const corePositions = new Float32Array(coreCount * 3);
+    const coreBase = new Float32Array(coreCount * 3);
+    const coreNoisePhase = new Float32Array(coreCount);
+
+    for (let i = 0; i < coreCount; i++) {
+      const phi = Math.acos(2 * Math.random() - 1);
+      const theta = Math.random() * Math.PI * 2;
+      const r = 2.5 + Math.random() * 0.6;
+      const x = r * Math.sin(phi) * Math.cos(theta);
+      const y = r * Math.cos(phi);
+      const z = r * Math.sin(phi) * Math.sin(theta);
+      coreBase.set([x, y, z], i * 3);
+      corePositions.set([x, y, z], i * 3);
+      coreNoisePhase[i] = Math.random() * Math.PI * 2;
+    }
+
+    coreGeometry.setAttribute('position', new THREE.BufferAttribute(corePositions, 3));
+    const corePoints = new THREE.Points(coreGeometry, coreMaterial);
+    scene.add(corePoints);
+
+    // Ring particles
+    const ringCount = 3200;
+    const ringGeometry = new THREE.BufferGeometry();
+    const ringPositions = new Float32Array(ringCount * 3);
+    const ringRadius = new Float32Array(ringCount);
+    const ringAngle = new Float32Array(ringCount);
+    const ringWarp = new Float32Array(ringCount);
+
+    for (let i = 0; i < ringCount; i++) {
+      const r = THREE.MathUtils.lerp(4.8, 9.5, Math.pow(Math.random(), 1.35));
+      const theta = Math.random() * Math.PI * 2;
+      const height = (Math.random() - 0.5) * 0.35;
+      const warp = (Math.random() - 0.5) * 0.25;
+      const x = r * Math.cos(theta);
+      const z = r * Math.sin(theta);
+      ringRadius[i] = r;
+      ringAngle[i] = theta;
+      ringWarp[i] = warp;
+      ringPositions.set([x, height, z], i * 3);
+    }
+    ringGeometry.setAttribute('position', new THREE.BufferAttribute(ringPositions, 3));
+    const ringPoints = new THREE.Points(ringGeometry, ringMaterial);
+    scene.add(ringPoints);
+
+    // Chaotic burst layer
+    const chaosCount = 1200;
+    const chaosGeometry = new THREE.BufferGeometry();
+    const chaosPositions = new Float32Array(chaosCount * 3);
+    chaosGeometry.setAttribute('position', new THREE.BufferAttribute(chaosPositions, 3));
+    const chaosPoints = new THREE.Points(chaosGeometry, chaosMaterial);
+    scene.add(chaosPoints);
+
+    // Gesture state
+    let targetSpread = 1.0;
+    let spread = 1.0;
+    let chaosLevel = 0.0;
+
+    const videoElement = document.getElementById('camera');
+    const fullscreenButton = document.getElementById('fullscreen');
+    fullscreenButton.addEventListener('click', () => {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen();
+      } else {
+        document.exitFullscreen();
+      }
+    });
+
+    function mapHandToSpread(landmarks) {
+      const wrist = landmarks[0];
+      const indexTip = landmarks[8];
+      const pinkyTip = landmarks[20];
+
+      const d1 = Math.hypot(indexTip.x - wrist.x, indexTip.y - wrist.y);
+      const d2 = Math.hypot(pinkyTip.x - wrist.x, pinkyTip.y - wrist.y);
+      const openness = (d1 + d2) * 0.5;
+
+      const normalized = THREE.MathUtils.clamp((openness - 0.08) / 0.16, 0, 1);
+      return THREE.MathUtils.lerp(0.55, 2.5, normalized);
+    }
+
+    const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.55,
+    });
+
+    hands.onResults((results) => {
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        targetSpread = mapHandToSpread(results.multiHandLandmarks[0]);
+      }
+    });
+
+    async function initCamera() {
+      const cameraStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+      videoElement.srcObject = cameraStream;
+      await videoElement.play();
+
+      const mpCamera = new Camera(videoElement, {
+        onFrame: async () => {
+          await hands.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480,
+      });
+      mpCamera.start();
+    }
+
+    initCamera().catch((err) => console.error('Camera init failed', err));
+
+    // Animation helpers
+    const clock = new THREE.Clock();
+
+    function updateCore(dt) {
+      const positions = coreGeometry.getAttribute('position');
+      for (let i = 0; i < coreCount; i++) {
+        const baseIdx = i * 3;
+        const bx = coreBase[baseIdx];
+        const by = coreBase[baseIdx + 1];
+        const bz = coreBase[baseIdx + 2];
+
+        const breathing = 0.04 * Math.sin(clock.elapsedTime * 1.4 + coreNoisePhase[i]);
+        const jitter = chaosLevel * (Math.random() - 0.5) * 0.5;
+        positions.array[baseIdx] = (bx * spread * (1 + breathing)) + jitter;
+        positions.array[baseIdx + 1] = (by * spread * (1 + breathing)) + jitter;
+        positions.array[baseIdx + 2] = (bz * spread * (1 + breathing)) + jitter;
+      }
+      positions.needsUpdate = true;
+
+      const luminance = THREE.MathUtils.clamp(spread / 2.5, 0.25, 1.0);
+      coreMaterial.opacity = THREE.MathUtils.lerp(0.35, 0.95, luminance);
+      light.intensity = THREE.MathUtils.lerp(0.6, 2.2, luminance);
+    }
+
+    function updateRing(dt) {
+      const positions = ringGeometry.getAttribute('position');
+      for (let i = 0; i < ringCount; i++) {
+        const r = ringRadius[i] * spread;
+        const speed = keplerMu / Math.pow(r, 1.5); // Keplerian angular speed
+        ringAngle[i] += speed * dt * 2.2;
+
+        const angle = ringAngle[i];
+        const warp = ringWarp[i];
+
+        let x = r * Math.cos(angle);
+        let z = r * Math.sin(angle);
+        let y = warp + Math.sin(angle * 2.5) * 0.08;
+
+        const chaos = chaosLevel * (Math.random() - 0.5) * 0.8;
+        positions.array[i * 3] = x + chaos;
+        positions.array[i * 3 + 1] = y + chaos * 0.4;
+        positions.array[i * 3 + 2] = z + chaos;
+      }
+      positions.needsUpdate = true;
+
+      const brightness = THREE.MathUtils.clamp(spread / 2.5, 0.2, 1);
+      ringMaterial.opacity = THREE.MathUtils.lerp(0.3, 0.9, brightness);
+      ringMaterial.size = THREE.MathUtils.lerp(0.06, 0.12, brightness);
+    }
+
+    function updateChaos(dt) {
+      const positions = chaosGeometry.getAttribute('position');
+      const burst = THREE.MathUtils.smoothstep(spread, 1.6, 2.6);
+      chaosLevel = burst;
+
+      for (let i = 0; i < chaosCount; i++) {
+        const radius = 6 + Math.random() * 8 * spread;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        const noiseAmp = 0.8 + burst * 1.5;
+        const dx = (Math.random() - 0.5) * noiseAmp;
+        const dy = (Math.random() - 0.5) * noiseAmp;
+        const dz = (Math.random() - 0.5) * noiseAmp;
+
+        positions.array[i * 3] = radius * Math.sin(phi) * Math.cos(theta) + dx;
+        positions.array[i * 3 + 1] = radius * Math.cos(phi) + dy;
+        positions.array[i * 3 + 2] = radius * Math.sin(phi) * Math.sin(theta) + dz;
+      }
+      positions.needsUpdate = true;
+      chaosMaterial.opacity = THREE.MathUtils.lerp(0, 0.65, burst);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = clock.getDelta();
+      spread = THREE.MathUtils.lerp(spread, targetSpread, 0.1);
+
+      updateCore(dt);
+      updateRing(dt);
+      updateChaos(dt);
+
+      scene.rotation.y += 0.003 * dt * 60;
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+    });
+  </script>
+</body>
+</html>
